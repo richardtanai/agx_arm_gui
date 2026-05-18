@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+from agx_arm_gui.spb_bridge_node import main
+main()

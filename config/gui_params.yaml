@@ -1,0 +1,72 @@
+# AGX Arm GUI — central configuration
+# Edit this file to change defaults shown in the GUI and used by spb_bridge_node.
+# Override path: set AGX_ARM_CONFIG env var to point at a custom copy.
+
+can:
+  interface: can0
+  script: ~/agx_arm_ws/src/agx_arm_ros/scripts/can_activate.sh
+
+arm_controller:
+  arm_type: piper          # piper | piper_x | piper_l | piper_h | nero
+  effector_type: agx_gripper  # none | agx_gripper | revo2
+  revo2_side: left         # left | right (only used when effector_type is revo2)
+  tcp_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # x y z rx ry rz (m / rad)
+
+spb_bridge:
+  # Sparkplug B namespace identity
+  group_id: DMAT
+  edge_node_id: agx_arm_bridge
+  device_id: piper_arm
+
+  # ID of the SCADA primary host we monitor on STATE/<id>.
+  # If this host goes OFFLINE, the bridge enters Safe State (Halt + Aborted).
+  primary_host_id: IgnitionPrimary
+
+  # TF frames for end-effector pose. ee_frame must name a link present in
+  # the loaded URDF (use `ros2 run tf2_tools view_frames` to list).
+  # Pick the value that matches arm_controller.effector_type above:
+  #   - none         → link6
+  #   - agx_gripper  → gripper_base
+  #   - revo2        → revo2_flange
+  base_frame: base_link
+  ee_frame: gripper_base
+
+  # Report-by-Exception deadbands. Telemetry is also fully republished every
+  # 5 s as a heartbeat for SCADA-side stale-detection.
+  joint_deadband_deg: 0.1     # joint angle change required to publish (degrees)
+  ee_deadband_m: 0.001        # 1 mm
+  ee_deadband_deg: 0.5        # 0.5 deg roll/pitch/yaw
+  # Gripper: full stroke in metres (agx_gripper = 0.1). Positions/Gripper
+  # is published as width / max, clamped to [0=closed, 1=fully open].
+  gripper_max_width_m: 0.1
+  gripper_deadband: 0.01      # 1 % of full stroke
+
+
+  # --- Broker selection ---
+  # broker_type: local | hivemq
+  broker_type: local
+
+  # NOTE: Broker host / username / password live in gui_secrets.yaml (gitignored).
+  # See gui_secrets.example.yaml for the expected structure.
+  local:
+    port: 1883
+    use_tls: false
+
+  hivemq:
+    port: 8883
+    use_tls: true
+
+# IIoT Device Mode — when enabled in the GUI, an SpB DCMD Trigger plays back a
+# recorded waypoint sequence. target_map maps DCMD Commands/TargetID → YAML
+# file (relative to waypoints_dir or absolute). target_id 0 means "play the
+# sequence currently loaded in the GUI" — handy during commissioning.
+iiot_device:
+  waypoints_dir: ~/agx_arm_ws/waypoints
+  default_speed: 1.0
+  target_map:
+    1: play.yaml
+    2: pick.yaml
+    3: place.yaml
+    4: home.yaml
+
+

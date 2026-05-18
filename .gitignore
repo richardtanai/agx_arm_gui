@@ -1,0 +1,18 @@
+# Secrets — keep real credentials out of git.
+# Copy gui_secrets.example.yaml → gui_secrets.yaml and fill it in locally.
+**/config/gui_secrets.yaml
+
+# Build / install artefacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Editor
+.vscode/
+*.swp
