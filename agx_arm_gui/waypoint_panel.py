@@ -167,8 +167,8 @@ class WaypointPanel(QGroupBox):
         iiot_row = QHBoxLayout()
         self._iiot_check = QCheckBox("IIoT Device Mode")
         self._iiot_check.setToolTip(
-            "When enabled, an SpB DCMD Trigger plays back a recorded waypoint "
-            "sequence selected by Commands/TargetID. TargetID 0 plays the "
+            "When enabled, an SpB DCMD Cmd/CntrlCmd=Start plays back a recorded "
+            "waypoint sequence selected by Cmd/TargetID. TargetID 0 plays the "
             "sequence currently loaded in the GUI; non-zero IDs are looked up "
             "in iiot_device.target_map (gui_params.yaml)."
         )

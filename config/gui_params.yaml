@@ -13,10 +13,13 @@ arm_controller:
   tcp_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # x y z rx ry rz (m / rad)
 
 spb_bridge:
-  # Sparkplug B namespace identity
-  group_id: DMAT
-  edge_node_id: agx_arm_bridge
-  device_id: piper_arm
+  # Sparkplug B namespace identity (ISA-95 migration)
+  # Enterprise=DMATDTS  Area=DLSU  Site=LS  Line=Mini_Factory  Cell=agx_arm_bridge  Device=piper_arm
+  # GID = Enterprise, Node = Area, Device = Site. Line/Cell/Device live in the metric prefix
+  # applied inside spb_bridge_node.py (METRIC_PREFIX = Mini_Factory/agx_arm_bridge/piper_arm).
+  group_id: DMATDTS
+  edge_node_id: DLSU
+  device_id: LS
 
   # ID of the SCADA primary host we monitor on STATE/<id>.
   # If this host goes OFFLINE, the bridge enters Safe State (Halt + Aborted).
@@ -53,8 +56,8 @@ spb_bridge:
     use_tls: false
 
   hivemq:
-    port: 8883
-    use_tls: true
+    host: ""
+
 
 # IIoT Device Mode — when enabled in the GUI, an SpB DCMD Trigger plays back a
 # recorded waypoint sequence. target_map maps DCMD Commands/TargetID → YAML
