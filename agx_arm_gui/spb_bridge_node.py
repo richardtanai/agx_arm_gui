@@ -4,9 +4,10 @@ Implements the partial spec defined in docs/migration_to_isa.md:
 
 - ISA-95 identity:  GID=DMATDTS, Node=DLSU, Device=LS.
 - All device metrics live under METRIC_PREFIX = Mini_Factory/agx_arm_bridge/piper_arm.
-- PackML state machine driven by SCADA writes to Cmd/CntrlCmd:
-      Status/State/Current ∈ {Idle=3, Execute=5, Complete=16, Aborted=8}
-      Cmd/CntrlCmd        ∈ {Undefined=0, Reset=1, Start=2, Stop=3, Clear=9}
+- PackML state machine driven by SCADA Boolean writes to Cmd/CntrlCmd/<name>:
+      Cmd/CntrlCmd/Reset, /Start, /Stop, /Clear — write True to trigger
+      Status/State/Current/<name> — one-hot Booleans: /Idle, /Execute, /Complete, /Aborted
+- Cmd/TargetID (Int32) selects the waypoint sequence played on Start.
 - Sparse alarm tree under Alarm/Active/<code>/ (codes 7001..7006).
 - Motion telemetry under Motion/Joint/J<n>/Actual/Position; gripper opening under
   Gripper/Opening/Actual.
@@ -60,7 +61,15 @@ STATE_NAMES = {
     STATE_ABORTED:  "Aborted",
 }
 
-# OMAC Cmd/CntrlCmd codes — writable from SCADA
+# One-hot Boolean sub-tags for Status/State/Current (published as DDATA on transition)
+_STATE_BOOL_TAGS = {
+    STATE_IDLE:     "Status/State/Current/Idle",
+    STATE_EXECUTE:  "Status/State/Current/Execute",
+    STATE_COMPLETE: "Status/State/Current/Complete",
+    STATE_ABORTED:  "Status/State/Current/Aborted",
+}
+
+# OMAC Cmd/CntrlCmd codes — each exposed as a Boolean sub-tag; write True to trigger
 CMD_UNDEFINED = 0
 CMD_RESET     = 1
 CMD_START     = 2
@@ -73,6 +82,17 @@ CMD_NAMES = {
     CMD_STOP:      "Stop",
     CMD_CLEAR:     "Clear",
 }
+
+# Boolean sub-tags for Cmd/CntrlCmd (SCADA writes True to trigger; bridge echoes False)
+_CMD_BOOL_TAGS = {
+    CMD_RESET: "Cmd/CntrlCmd/Reset",
+    CMD_START: "Cmd/CntrlCmd/Start",
+    CMD_STOP:  "Cmd/CntrlCmd/Stop",
+    CMD_CLEAR: "Cmd/CntrlCmd/Clear",
+}
+
+# Reverse lookup used in _handle_dcmd: full metric name → CMD code
+_CMD_BOOL_NAMES: dict = {}  # populated after _m() is defined below
 
 # ISA-18.2 alarm lifecycle subset used by the bridge.
 ALARM_NORMAL = 1
@@ -98,6 +118,10 @@ DEFAULT_TARGET_ID = 0
 def _m(suffix: str) -> str:
     """Prepend the device metric prefix to a tag suffix."""
     return f"{METRIC_PREFIX}/{suffix}"
+
+
+# Populate the reverse-lookup now that _m() is available.
+_CMD_BOOL_NAMES = {_m(suffix): code for code, suffix in _CMD_BOOL_TAGS.items()}
 
 
 class SpbBridgeNode(Node):
@@ -276,20 +300,17 @@ class SpbBridgeNode(Node):
     def _publish_dbirth(self, client):
         payload = getDeviceBirthPayload()
 
-        # Status
-        state_m = addMetric(payload, _m("Status/State/Current"), None,
-                            MetricDataType.Int32, self._state)
-        _attach_lookup(state_m, STATE_NAMES)
+        # Status — one-hot Booleans; exactly one is True at any time
+        for state_code, suffix in _STATE_BOOL_TAGS.items():
+            addMetric(payload, _m(suffix), None,
+                      MetricDataType.Boolean, self._state == state_code)
         addMetric(payload, _m("Status/Heartbeat"), None,
                   MetricDataType.Boolean, self._heartbeat)
 
-        # Cmd — writable. CntrlCmd is birthed at Undefined and auto-clears
-        # back to 0 after acting. TargetID is the currently-selected waypoint
-        # sequence — SCADA writes it before issuing Start, and it retains its
-        # value across cycles.
-        cmd_m = addMetric(payload, _m("Cmd/CntrlCmd"), None,
-                          MetricDataType.Int32, CMD_UNDEFINED)
-        _attach_lookup(cmd_m, CMD_NAMES)
+        # Cmd — Boolean sub-tags. SCADA writes True to trigger; bridge echoes
+        # False after acting. TargetID retains its value across cycles.
+        for suffix in _CMD_BOOL_TAGS.values():
+            addMetric(payload, _m(suffix), None, MetricDataType.Boolean, False)
         addMetric(payload, _m("Cmd/TargetID"), None,
                   MetricDataType.Int32, self._target_id)
 
@@ -434,24 +455,22 @@ class SpbBridgeNode(Node):
             self.get_logger().error(f"Failed to parse DCMD: {exc}")
             return
 
-        cntrl_name  = _m("Cmd/CntrlCmd")
         target_name = _m("Cmd/TargetID")
         for metric in payload.metrics:
             name = metric.name
-            if name == cntrl_name:
-                try:
-                    code = int(metric.int_value)
-                except Exception:
-                    self.get_logger().error("DCMD: Cmd/CntrlCmd not Int32")
+            if name in _CMD_BOOL_NAMES:
+                if not metric.boolean_value:
+                    # Only act on True writes; ignore the False echo-back.
                     continue
+                code = _CMD_BOOL_NAMES[name]
                 self.get_logger().info(
-                    f"DCMD Cmd/CntrlCmd={code} ({CMD_NAMES.get(code, '?')}) | "
+                    f"DCMD Cmd/CntrlCmd/{CMD_NAMES.get(code, '?')}=True | "
                     f"state={self._state} ({STATE_NAMES.get(self._state, '?')}) | "
                     f"target_id={self._target_id}"
                 )
                 self._execute_cntrl_cmd(code)
-                # Auto-clear back to 0 after acting (OMAC convention).
-                self._publish_ddata({cntrl_name: (MetricDataType.Int32, CMD_UNDEFINED)})
+                # Echo False after acting so the SCADA tag resets automatically.
+                self._publish_ddata({name: (MetricDataType.Boolean, False)})
 
             elif name == target_name:
                 try:
@@ -531,7 +550,8 @@ class SpbBridgeNode(Node):
         )
         self._state = new_state
         self._publish_ddata({
-            _m("Status/State/Current"): (MetricDataType.Int32, new_state),
+            _m(suffix): (MetricDataType.Boolean, new_state == state_code)
+            for state_code, suffix in _STATE_BOOL_TAGS.items()
         })
 
     def _start_cycle(self):
@@ -664,21 +684,6 @@ class SpbBridgeNode(Node):
         except Exception:
             pass
         super().destroy_node()
-
-
-# ---------------------------------------------------------------------------
-# PropertySet helpers
-# ---------------------------------------------------------------------------
-
-def _attach_lookup(metric, lookup: dict):
-    """Attach a JSON-encoded {code: name} dictionary as a Documentation property
-    so Ignition (or any downstream client) can decode the integer state/command
-    codes without hard-coding the table."""
-    ps = metric.properties
-    ps.keys.append("Documentation")
-    pv = ps.values.add()
-    pv.type = 12  # String
-    pv.string_value = json.dumps({str(k): v for k, v in lookup.items()})
 
 
 # ---------------------------------------------------------------------------
