@@ -122,6 +122,8 @@ class _RosWorker(Node):
         # direct JointState publishing.
         self._traj_action = ActionClient(self, FollowJointTrajectory,
                                          "/arm_controller/follow_joint_trajectory")
+        self._gripper_action = ActionClient(self, FollowJointTrajectory,
+                                            "/gripper_controller/follow_joint_trajectory")
         self._active_traj_goal_handle = None
         self._traj_seq_running = False
         self._traj_seq_index = 0
@@ -338,28 +340,34 @@ class _RosWorker(Node):
         positions_in = list(wp.positions)
         traj_names = []
         traj_positions = []
-        gripper_position: Optional[float] = None
+        gripper_traj_names: list = []
+        gripper_traj_positions: list = []
+        gripper_position: Optional[float] = None  # legacy "gripper" joint fallback
         for n, p in zip(names_in, positions_in):
             if n.startswith("joint"):
                 traj_names.append(n)
                 traj_positions.append(float(p))
             elif n == "gripper":
                 gripper_position = float(p)
+            elif n in ("gripper_joint1", "gripper_joint2"):
+                gripper_traj_names.append(n)
+                gripper_traj_positions.append(float(p))
         if not traj_names:
             self._finish_traj_playback(False, "No arm joints in sequence")
             return
 
-        # Gripper joint position (when recorded) takes precedence; fall back
-        # to the cached width so the gripper still moves on files saved before
-        # publish_gripper_joint=true was the default.
-        self._send_gripper_command(gripper_position, wp.gripper_width)
-
-        # The controller interpolates from current to target over time_from_start.
-        # We use this single-point form (one goal per waypoint) so each waypoint
-        # gets its own dwell.
         secs = max(wp.hold_time / self._traj_seq_speed, 0.05)
         sec_int = int(secs)
         nsec_int = int((secs - sec_int) * 1e9)
+
+        # Gripper in parallel with arm — prefer gripper_controller action (same
+        # path MoveIt uses); fall back to control/joint_states for legacy files.
+        if gripper_traj_names and self._gripper_action.server_is_ready():
+            self._send_gripper_traj(gripper_traj_names, gripper_traj_positions, secs)
+        else:
+            if gripper_position is None and gripper_traj_names:
+                gripper_position = abs(gripper_traj_positions[0]) * 2.0
+            self._send_gripper_command(gripper_position, wp.gripper_width)
 
         traj = JointTrajectory()
         traj.joint_names = traj_names
@@ -417,6 +425,20 @@ class _RosWorker(Node):
         self._traj_seq_progress_cb = None
         if cb:
             cb(ok, reason)
+
+    def _send_gripper_traj(self, names: list, positions: list, secs: float):
+        """Send gripper joints to gripper_controller/follow_joint_trajectory (fire-and-forget)."""
+        sec_int = int(secs)
+        nsec_int = int((secs - sec_int) * 1e9)
+        traj = JointTrajectory()
+        traj.joint_names = names
+        point = JointTrajectoryPoint()
+        point.positions = positions
+        point.time_from_start = Duration(sec=sec_int, nanosec=nsec_int)
+        traj.points = [point]
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = traj
+        self._gripper_action.send_goal_async(goal)
 
     def _send_gripper_command(self, joint_pos: Optional[float], width_m: Optional[float]):
         """Dispatch the gripper width separately from the arm trajectory.
@@ -713,3 +735,58 @@ class WaypointManager:
         loaded" the no-config default.
         """
         self._node.configure_iiot(enabled, resolve_target, default_speed, event_cb)
+
+
+# ---------------------------------------------------------------------------
+# Standalone headless entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    """Run WaypointManager in IIoT device mode without the GUI.
+
+    Reads waypoints_dir, target_map, and default_speed from gui_params.yaml
+    (overlaid by gui_secrets.yaml). Exits cleanly on SIGINT / SIGTERM.
+    """
+    import signal
+
+    cfg           = load_config()
+    waypoints_dir = Path(cfg.iiot_waypoints_dir).expanduser()
+    target_map    = cfg.iiot_target_map
+
+    def resolve_target(target_id: int) -> Optional[Path]:
+        filename = target_map.get(target_id)
+        if filename is None:
+            return None
+        p = waypoints_dir / filename
+        return p if p.is_file() else None
+
+    manager = WaypointManager()
+    manager.configure_iiot(
+        enabled=True,
+        resolve_target=resolve_target,
+        default_speed=cfg.iiot_default_speed,
+        event_cb=lambda s: print(f"[IIoT] {s}", flush=True),
+    )
+
+    print(f"[WaypointManager] IIoT mode active", flush=True)
+    print(f"[WaypointManager] waypoints_dir : {waypoints_dir}", flush=True)
+    print(f"[WaypointManager] target_map    : {target_map}", flush=True)
+
+    running = True
+
+    def _stop(*_):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGINT,  _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    try:
+        while running:
+            time.sleep(0.5)
+    finally:
+        manager.shutdown()
+
+
+if __name__ == "__main__":
+    main()

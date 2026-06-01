@@ -1,3 +1,5 @@
+> **DEPRECATED** — superseded by [spb_node_spec.md](spb_node_spec.md). Do not update this file.
+
 # Packaging Line — SCADA / MES / Visualization Integration Specification
 
 Authoritative contract for the **Sparkplug B** data model exposed by every

@@ -1,3 +1,5 @@
+> **DEPRECATED** — superseded by [spb_node_spec.md](spb_node_spec.md). Do not update this file.
+
 1. System Context
 
     Edge Node (Raspberry Pi): Hardware-to-cloud gateway. Runs Sparkplug B client and AgileX CAN drivers.

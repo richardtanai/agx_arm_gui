@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+from agx_arm_gui.waypoint_manager import main
+main()

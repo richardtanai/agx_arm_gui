@@ -1,0 +1,36 @@
+version: 1
+arm_type: piper
+joint_names:
+- joint1
+- joint2
+- joint3
+- joint4
+- joint5
+- joint6
+- gripper_joint1
+- gripper_joint2
+waypoints:
+- name: wp_1
+  positions:
+  - 0.0
+  - 0.1626123264083117
+  - -0.4216017341117502
+  - 0.0
+  - 0.25865779514555964
+  - 0.0
+  - 4.9999999999999996e-05
+  - -4.9999999999999996e-05
+  gripper_width: 9.999999999999999e-05
+  hold_time: 1.0
+- name: wp_2
+  positions:
+  - 0.0
+  - 0.029321531433504737
+  - -0.09096656061394445
+  - 0.0
+  - 0.0618370153981591
+  - 0.0
+  - 4.9999999999999996e-05
+  - -4.9999999999999996e-05
+  gripper_width: 9.999999999999999e-05
+  hold_time: 1.0

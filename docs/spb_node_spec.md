@@ -1,217 +1,312 @@
-# Sparkplug B Node Specification — agx_arm_bridge
+# Sparkplug B Bridge — System Specification
 
-## 1. Overview
-
-The `spb_bridge_node` is a ROS 2 node that exposes robot telemetry and a command interface to any Sparkplug B–compliant MQTT host (Ignition SCADA, HiveMQ, custom clients). It implements the full Sparkplug B device lifecycle: NBIRTH → DBIRTH → DDATA → DCMD → NDEATH.
-
-**Implementation library:** Eclipse Tahu (`tahu.sparkplug_b_pb2`, `tahu.sparkplug_b`)
-**Protocol version:** `spBv1.0`
-**MQTT version:** MQTTv3.1.1
+> **Current as of:** 2026-06  
+> **Replaces:** all earlier `spb_node_spec`, `migration_to_isa`, `scada_integration`, and `mqtt_spb_link` docs  
+> **Implementation:** `agx_arm_gui/spb_bridge_node.py`
 
 ---
 
-## 2. Identity
+## 1. Overview
 
-| Parameter      | Default value     | ROS parameter     |
-|----------------|-------------------|-------------------|
-| Group ID       | `DMAT`            | `group_id`        |
-| Edge Node ID   | `agx_arm_bridge`  | `edge_node_id`    |
-| Device ID      | `piper_arm`       | `device_id`       |
+`spb_bridge_node` is a ROS 2 node that exposes the robot arm's telemetry and a PackML command interface to any Sparkplug B–compliant MQTT host (Ignition SCADA, HiveMQ, custom clients).
 
-Configured in `config/gui_params.yaml` under `spb_bridge`. Override at launch with `--ros-args -p group_id:=<value>`.
+It implements the full Sparkplug B device lifecycle:
+
+```
+NBIRTH → DBIRTH → DDATA ⇄ DCMD → NDEATH (LWT)
+```
+
+| Attribute | Value |
+|---|---|
+| Sparkplug namespace | `spBv1.0` |
+| MQTT version | MQTTv3.1.1 |
+| Library | Eclipse Tahu (`tahu.sparkplug_b`) |
+
+---
+
+## 2. ISA-95 / Sparkplug B Identity
+
+| ISA-95 Level | Value | Sparkplug B field |
+|---|---|---|
+| Enterprise + Area + Site + Factory | `DMATDTS_DLSU_LS_MiniFactory` | Group ID |
+| Cell | `agx_arm_bridge` | Edge Node ID |
+| Unit | `piper_arm` | Device ID |
+
+**Full DBIRTH topic:**
+```
+spBv1.0/DMATDTS_DLSU_LS_MiniFactory/DBIRTH/agx_arm_bridge/piper_arm
+```
+
+**Full SCADA tag path** (Ignition tag browser):
+```
+DMATDTS_DLSU_LS_MiniFactory / agx_arm_bridge / piper_arm / <metric>
+```
+
+Metric names are tag-path suffixes only — the device identity is encoded in the Sparkplug B topic, so no additional prefix is prepended to metric names.
+
+All values are configurable in `config/gui_params.yaml` under `spb_bridge`.
 
 ---
 
 ## 3. MQTT Connection
 
-| Parameter   | Default       | ROS parameter   |
-|-------------|---------------|-----------------|
-| Host        | `localhost`   | `mqtt_host`     |
-| Port        | `1883`        | `mqtt_port`     |
-| Username    | *(empty)*     | `mqtt_username` |
-| Password    | *(empty)*     | `mqtt_password` |
-| TLS         | `false`       | `use_tls`       |
-| Keep-alive  | 60 s          | —               |
-| Client ID   | `agx_arm_bridge` (edge node ID) | — |
+| Parameter | Default | Source |
+|---|---|---|
+| Host | `localhost` | `gui_secrets.yaml → spb_bridge.local.host` |
+| Port | `1883` | `gui_params.yaml → spb_bridge.local.port` |
+| TLS | `false` | `gui_params.yaml → spb_bridge.local.use_tls` |
+| Username / Password | *(empty)* | `gui_secrets.yaml` |
+| Keep-alive | 60 s | hardcoded |
+| Client ID | `agx_arm_bridge` | Edge Node ID |
 
-TLS uses `ssl.CERT_REQUIRED` with `PROTOCOL_TLS_CLIENT`. Credentials are optional; leave empty for anonymous brokers.
+For HiveMQ Cloud, set `broker_type: hivemq` in `gui_params.yaml` and fill `gui_secrets.yaml → spb_bridge.hivemq.*`.  
+TLS connections use `ssl.CERT_REQUIRED` / `PROTOCOL_TLS_CLIENT`.
 
 ---
 
 ## 4. Topic Map
 
-All topics follow the pattern `spBv1.0/{group_id}/{msg_type}/{edge_node_id}[/{device_id}]`.
-
-| Topic | Direction | QoS | Retain | Trigger |
+| Topic | Direction | QoS | Retain | When |
 |---|---|---|---|---|
-| `spBv1.0/DMAT/NBIRTH/agx_arm_bridge` | Publish | 1 | No | On MQTT connect |
-| `spBv1.0/DMAT/NDEATH/agx_arm_bridge` | Publish (LWT) | 1 | No | Broker auto-sends on ungraceful disconnect |
-| `spBv1.0/DMAT/DBIRTH/agx_arm_bridge/piper_arm` | Publish | 1 | No | On MQTT connect (after NBIRTH) |
-| `spBv1.0/DMAT/DDEATH/agx_arm_bridge/piper_arm` | — | — | — | Defined but not explicitly published |
-| `spBv1.0/DMAT/DDATA/agx_arm_bridge/piper_arm` | Publish | 0 | No | Continuously (telemetry) or on state change |
-| `spBv1.0/DMAT/DCMD/agx_arm_bridge/piper_arm` | Subscribe | 1 | — | Inbound commands from SCADA/PLC |
+| `spBv1.0/…/NBIRTH/agx_arm_bridge` | Publish | 1 | No | On connect |
+| `spBv1.0/…/NDEATH/agx_arm_bridge` | LWT | 1 | No | Broker auto-sends on ungraceful disconnect |
+| `spBv1.0/…/DBIRTH/agx_arm_bridge/piper_arm` | Publish | 1 | No | On connect (after NBIRTH) |
+| `spBv1.0/…/DDATA/agx_arm_bridge/piper_arm` | Publish | 0 | No | Timer-driven telemetry and state changes |
+| `spBv1.0/…/DCMD/agx_arm_bridge/piper_arm` | Subscribe | 1 | — | Inbound SCADA commands |
+| `spBv1.0/STATE/IgnitionPrimary` | Subscribe | 1 | — | Primary host liveness monitoring |
+
+`…` = `DMATDTS_DLSU_LS_MiniFactory`
 
 ---
 
 ## 5. NBIRTH Payload
 
-Published once on connect. Declares the node-level metrics to the primary application.
+Published once per connect. Declares the node-level control metric.
 
-| Metric Name | Type | Initial Value | Description |
+| Metric | Type | Value | Description |
 |---|---|---|---|
-| `Node Control/Rebirth` | Boolean | `false` | Writing `true` triggers a re-publish of NBIRTH + DBIRTH |
+| `Node Control/Rebirth` | Boolean | `false` | SCADA writes `true` to force NBIRTH + DBIRTH re-publish |
 
 ---
 
-## 6. DBIRTH Payload
+## 6. DBIRTH — Full Tag Tree
 
-Published once on connect, immediately after NBIRTH. Defines the complete device metric schema — types and initial values — so the primary application can build the tag tree before any DDATA arrives.
+Published once per connect immediately after NBIRTH. Defines every metric name and type so the SCADA tag browser is fully populated before any DDATA arrives.
 
-### Status Metrics
+### 6.1 PackML State — one-hot Booleans
 
-| Metric Name | Type | Initial Value | Description |
+Exactly one of these is `true` at any time.
+
+| Metric | Type | Initial | Description |
 |---|---|---|---|
-| `Status/Overall` | String | `"Idle"` | Current operating mode. Values: `Idle`, `Physical`, `Fake`, `Error` |
-| `Status/Busy` | Boolean | `false` | `true` while a motion trajectory is executing |
-| `Status/Done` | Boolean | `false` | Pulses `true` for 2 s after successful motion completion |
-| `Status/Heartbeat` | Boolean | `false` | Toggles every 500 ms — used as a watchdog |
+| `Status/State/Current/Idle` | Boolean | `true` | Waiting for a Start command |
+| `Status/State/Current/Execute` | Boolean | `false` | Motion in progress |
+| `Status/State/Current/Complete` | Boolean | `false` | Cycle finished cleanly |
+| `Status/State/Current/Aborted` | Boolean | `false` | Fault; alarms are active |
+| `Status/Heartbeat` | Boolean | `false` | Toggles every 500 ms as a watchdog |
 
-### Joint Telemetry
+### 6.2 Commands — one-hot Booleans (SCADA-writable)
 
-| Metric Name | Type | Initial Value | Unit |
+SCADA writes `true` to trigger a command. The bridge echoes `true` (acknowledgement), acts, then echoes `false` for **all four** command tags (one-hot reset).
+
+| Metric | Type | Transition | Guard |
 |---|---|---|---|
-| `Positions/Joints/J1` | Float | `0.0` | Degrees |
-| `Positions/Joints/J2` | Float | `0.0` | Degrees |
-| `Positions/Joints/J3` | Float | `0.0` | Degrees |
-| `Positions/Joints/J4` | Float | `0.0` | Degrees |
-| `Positions/Joints/J5` | Float | `0.0` | Degrees |
-| `Positions/Joints/J6` | Float | `0.0` | Degrees |
+| `Cmd/CntrlCmd/Reset` | Boolean | Complete → Idle | State must be Complete |
+| `Cmd/CntrlCmd/Start` | Boolean | Idle → Execute | State must be Idle; no active alarms |
+| `Cmd/CntrlCmd/Stop` | Boolean | any → Idle | Always accepted; halts in-flight motion |
+| `Cmd/CntrlCmd/Clear` | Boolean | Aborted → Idle | State must be Aborted; clears all alarms first |
+| `Cmd/TargetID` | Int32 | *(stores value)* | Selects the waypoint sequence played on Start |
 
-### End-Effector Pose
+`Cmd/TargetID` is not a trigger command — it stores a value that is echoed back to SCADA on write.
 
-TF lookup from `base_link` → `gripper_link`. Frames are configurable via `base_frame` / `ee_frame` ROS parameters.
+### 6.3 Motion Telemetry
 
-| Metric Name | Type | Initial Value | Unit |
+| Metric | Type | Unit | Description |
 |---|---|---|---|
-| `Positions/EE/X` | Float | `0.0` | Metres |
-| `Positions/EE/Y` | Float | `0.0` | Metres |
-| `Positions/EE/Z` | Float | `0.0` | Metres |
-| `Positions/EE/Roll` | Float | `0.0` | Degrees |
-| `Positions/EE/Pitch` | Float | `0.0` | Degrees |
-| `Positions/EE/Yaw` | Float | `0.0` | Degrees |
+| `Motion/Joint/J1/Actual/Position` | Float | degrees | Joint 1 actual position |
+| `Motion/Joint/J2/Actual/Position` | Float | degrees | Joint 2 actual position |
+| `Motion/Joint/J3/Actual/Position` | Float | degrees | Joint 3 actual position |
+| `Motion/Joint/J4/Actual/Position` | Float | degrees | Joint 4 actual position |
+| `Motion/Joint/J5/Actual/Position` | Float | degrees | Joint 5 actual position |
+| `Motion/Joint/J6/Actual/Position` | Float | degrees | Joint 6 actual position |
+| `Gripper/Opening/Actual` | Float | 0–1 | Gripper opening fraction (0 = closed, 1 = fully open) |
 
-### Command Metrics (initial readable state)
+Gripper fraction = `feedback_width_m / gripper_max_width_m`. Default `gripper_max_width_m = 0.1 m` (agx_gripper stroke).
 
-| Metric Name | Type | Initial Value |
+### 6.4 Alarm Tree
+
+One set of four sub-tags per alarm code. All codes are declared at DBIRTH so SCADA sees the full catalogue immediately.
+
+| Metric | Type | Description |
 |---|---|---|
-| `Commands/Trigger` | Boolean | `false` |
-| `Commands/TargetID` | Int32 | `0` |
-| `Commands/Halt` | Boolean | `false` |
+| `Alarm/Active/{code}/State` | Int32 | `1` = Normal, `2` = Unacknowledged (active) |
+| `Alarm/Active/{code}/Priority` | Int32 | NAMUR NE107 priority (see §9) |
+| `Alarm/Active/{code}/Message` | String | Human-readable fault name |
+| `Alarm/Active/{code}/OnsetMs` | Int64 | Unix epoch ms when alarm was raised |
+| `Alarm/Summary/ActiveCount` | Int32 | Count of alarms currently in Unacknowledged state |
 
 ---
 
 ## 7. DDATA — Outbound Telemetry
 
-DDATA messages carry only the metrics that changed (delta encoding). Two independent timers drive outbound DDATA:
+Only changed metrics are included in each DDATA message (Report-by-Exception). Two timers run independently:
 
-### 7a. Telemetry Timer (10 Hz)
+### 7.1 Telemetry Timer — 10 Hz
 
-Fires every 100 ms. Publishes joint positions and, if a TF lookup succeeds within 50 ms, the EE pose. If the TF lookup fails the EE metrics are omitted for that cycle.
+Fires every 100 ms. Applies deadbands; publishes a metric only when it has moved beyond the threshold. Every 5 seconds the full set is re-published regardless (stale-detection bypass).
 
-| Metric | Rate | Notes |
+| Metric group | Deadband | Full-republish |
 |---|---|---|
-| `Positions/Joints/J1–J6` | 10 Hz | Source: `feedback/joint_states` or `control/joint_states` (whichever arrives last) |
-| `Positions/EE/X,Y,Z` | 10 Hz | Omitted if TF unavailable |
-| `Positions/EE/Roll,Pitch,Yaw` | 10 Hz | Omitted if TF unavailable |
+| `Motion/Joint/J*/Actual/Position` | 0.1 ° | every 5 s |
+| `Gripper/Opening/Actual` | 1 % of full stroke | every 5 s |
 
-### 7b. Heartbeat Timer (2 Hz)
+Source: `feedback/joint_states` (ROS subscription, 200 Hz from arm controller).  
+Joint positions are converted from radians to degrees before publishing.
 
-Publishes `Status/Heartbeat` (Boolean toggle) every 500 ms independently of the telemetry timer.
+### 7.2 Heartbeat Timer — 2 Hz
 
-### 7c. State-change DDATA
+`Status/Heartbeat` is toggled and published unconditionally every 500 ms.
 
-Published immediately on any robot state transition (not timer-driven):
+### 7.3 State-change DDATA
 
-| Event | Metrics published |
+Published immediately on every PackML state transition (not timer-driven). All four one-hot state tags are published in a single DDATA payload.
+
+### 7.4 Alarm-change DDATA
+
+Published immediately when an alarm is raised or cleared: `Alarm/Active/{code}/State`, `Alarm/Active/{code}/OnsetMs`, and `Alarm/Summary/ActiveCount`.
+
+---
+
+## 8. PackML State Machine
+
+### States
+
+| State | Meaning |
 |---|---|
-| Motion acknowledged (Phase 2) | `Status/Busy = true`, `Status/Overall = "Physical"` (or `"Fake"` in sim mode) |
-| Motion complete (Phase 4) | `Status/Busy = false`, `Status/Done = true`, `Status/Overall = "Idle"` |
-| Done pulse cleared (2 s after completion) | `Status/Done = false` |
-| Halt received | `Status/Busy = false`, `Status/Overall = "Idle"` |
-| Motion error | `Status/Busy = false`, `Status/Overall = "Error"` |
+| **Idle** | Ready. Waiting for a Start command. |
+| **Execute** | Motion in progress. |
+| **Complete** | Cycle finished. Waiting for Reset to return to Idle. |
+| **Aborted** | Fault state. One or more alarms are active. |
 
----
-
-## 8. DCMD — Inbound Commands
-
-The node subscribes to the DCMD topic and processes three command metrics. Commands can be sent individually or combined in a single payload.
-
-| Metric Name | Type | Behaviour |
-|---|---|---|
-| `Commands/TargetID` | Int32 | Stores the target pose index. Set this before asserting Trigger. |
-| `Commands/Trigger` | Boolean | `true` → starts the 4-phase handshake. `false` → clears trigger and begins execution (Phase 3). |
-| `Commands/Halt` | Boolean | `true` → immediately aborts the active motion and sets `Status/Overall = "Idle"`. |
-
----
-
-## 9. 4-Phase Handshake (Motion Sequence)
+### Transitions
 
 ```
-PLC / SCADA                        Bridge Node
-     │                                   │
-     │── DCMD: TargetID = N ────────────►│  (stores target index)
-     │── DCMD: Trigger   = true ────────►│  Phase 1 — Request
-     │                                   │── DDATA: Busy=true, Overall="Physical"  ◄─ Phase 2 — Acknowledge
-     │── DCMD: Trigger   = false ───────►│  Phase 3 — Execute (motion starts)
-     │                                   │  ... motion running ...
-     │                                   │── DDATA: Busy=false, Done=true, Overall="Idle"  ◄─ Phase 4 — Complete
-     │                                   │── DDATA: Done=false  (2 s later, auto-clear)
+             Reset
+ Complete ◄────────── ← Start ──── Idle
+                                     ↑
+                                     │ Stop (any state)
+                                     │ Reset (Complete only)
+                                     │ Clear (Aborted only)
+                          Execute ───┘
+                            │
+                      motion complete → Complete
+                      motion fault   → Aborted
+                      timeout (60 s) → Aborted
 ```
 
-**Abort path:** Send `Commands/Halt = true` at any point during Phase 2–4.
-
----
-
-## 10. Status/Overall State Machine
-
-```
-          ┌─────────────────────┐
-          │        Idle         │◄──── startup / halt / phase 4 complete
-          └─────────┬───────────┘
-                    │ Trigger received
-                    ▼
-          ┌─────────────────────┐
-          │  Physical / Fake    │  (Physical = real HW, Fake = sim_mode)
-          └─────┬───────────────┘
-                │               │
-         motion ok          motion error
-                │               │
-                ▼               ▼
-             Idle            Error
-```
-
-`sim_mode` is a ROS parameter (`false` by default). When `true`, `Status/Overall` shows `"Fake"` during execution instead of `"Physical"`.
-
----
-
-## 11. Last Will Testament (NDEATH)
-
-Set on the MQTT client before `connect()` is called. If the bridge process crashes or loses connectivity without a clean disconnect, the broker publishes this automatically.
-
-| Property | Value |
-|---|---|
-| Topic | `spBv1.0/DMAT/NDEATH/agx_arm_bridge` |
-| Payload | Tahu `getNodeDeathPayload()` (contains `bdSeq`) |
-| QoS | 1 |
-| Retain | No |
-
----
-
-## 12. ROS Interface
-
-| ROS Topic | Type | Direction | Description |
+| Command | From state | To state | Notes |
 |---|---|---|---|
-| `feedback/joint_states` | `sensor_msgs/JointState` | Subscribe | Joint feedback from real hardware |
-| `control/joint_states` | `sensor_msgs/JointState` | Subscribe | Joint feedback from simulation |
+| `Start` | Idle | Execute | Triggers waypoint playback via `iiot/execute` |
+| `Stop` | any | Idle | Halts in-flight motion immediately |
+| `Reset` | Complete | Idle | — |
+| `Clear` | Aborted | Idle | Clears all active alarms first |
 
-Both topics write to the same cache — whichever publishes last wins. This allows the bridge to work in both sim and real hardware without reconfiguration.
+### Command echo protocol
+
+```
+SCADA writes  Cmd/CntrlCmd/Start = true
+   Bridge echoes                        → Start = true   (acknowledged)
+   Bridge acts                          (state Idle → Execute)
+   Bridge echoes                        → Reset=false, Start=false, Stop=false, Clear=false
+```
+
+The one-hot reset of all four command tags guarantees the SCADA tag browser is left clean regardless of which command was triggered.
+
+---
+
+## 9. Alarm Management
+
+### Alarm codes
+
+| Code | Priority | Message | Raised by |
+|---|---|---|---|
+| 7001 | 2 (High) | `MotionTimeout` | No `iiot/status` complete within 60 s |
+| 7002 | 2 (High) | `MotionFailed` | `iiot/status` reports `aborted` or `error` |
+| 7003 | 1 (Critical) | `PrimaryHostOffline` | Primary host STATE goes OFFLINE |
+| 7004 | 1 (Critical) | `EStopAsserted` | *(reserved — not yet wired)* |
+| 7005 | 2 (High) | `GripperPartLost` | *(reserved — not yet wired)* |
+| 7006 | 4 (Maintenance) | `JointLimitApproach` | *(reserved — not yet wired)* |
+
+**Priority mapping** (NAMUR NE107): 1 = Failure/Critical, 2 = High, 4 = Maintenance.
+
+### Alarm lifecycle
+
+```
+Raise  → State = Unacknowledged (2), OnsetMs = now
+Clear  → State = Normal (1)
+```
+
+Alarms are only raised once per fault (re-raise ignored if already Unacknowledged). `Clear` command clears all active alarms before transitioning Aborted → Idle.
+
+---
+
+## 10. Primary Host Monitoring → Safe State
+
+The bridge subscribes to `spBv1.0/STATE/IgnitionPrimary` (configurable via `primary_host_id`).
+
+| Event | Action |
+|---|---|
+| `ONLINE` received (first or edge) | Clear alarm 7003 |
+| `OFFLINE` received (first or edge) | Raise alarm 7003 → halt motion → enter **Aborted** |
+
+The bridge parses both JSON `{"online": true/false}` and plain-text `ONLINE`/`OFFLINE` payloads.
+
+---
+
+## 11. ROS Interface
+
+### Subscriptions
+
+| Topic | Type | Description |
+|---|---|---|
+| `feedback/joint_states` | `sensor_msgs/JointState` | Arm joint positions (radians); 200 Hz from arm controller |
+| `feedback/gripper_status` | `agx_arm_msgs/GripperStatus` | Gripper opening width (metres) |
+
+Joint names expected: `joint1` … `joint6`. Gripper telemetry is silently omitted if `agx_arm_msgs` is unavailable.
+
+### Publications (IIoT bridge to WaypointManager)
+
+| Topic | Type | When |
+|---|---|---|
+| `iiot/execute` | `std_msgs/Int32` | On `Cmd/CntrlCmd/Start` — carries `Cmd/TargetID` value |
+| `iiot/halt` | `std_msgs/Empty` | On `Cmd/CntrlCmd/Stop` while a cycle is in flight |
+
+### Subscription (WaypointManager to bridge)
+
+| Topic | Type | Payloads |
+|---|---|---|
+| `iiot/status` | `std_msgs/String` | `ready` / `progress:i/t` / `complete:N` / `aborted:N` / `error:msg` |
+
+| Status | Bridge action |
+|---|---|
+| `complete` | State Execute → Complete |
+| `aborted` or `error` | Raise alarm 7002 → State Execute → Aborted |
+| `ready`, `progress` | Ignored (informational) |
+
+---
+
+## 12. Configuration Reference
+
+All fields below live in `config/gui_params.yaml` under `spb_bridge:`.  
+Secrets (host, username, password) are overlaid from `config/gui_secrets.yaml`.
+
+| Field | Default | Description |
+|---|---|---|
+| `group_id` | `DMATDTS_DLSU_LS_MiniFactory` | Sparkplug B Group ID |
+| `edge_node_id` | `agx_arm_bridge` | Sparkplug B Edge Node ID |
+| `device_id` | `piper_arm` | Sparkplug B Device ID |
+| `primary_host_id` | `IgnitionPrimary` | Primary host name on `STATE/<id>` |
+| `broker_type` | `local` | `local` or `hivemq` |
+| `joint_deadband_deg` | `0.1` | Minimum joint change to trigger DDATA |
+| `gripper_deadband` | `0.01` | Minimum gripper fraction change to trigger DDATA |
+| `gripper_max_width_m` | `0.1` | Full stroke of the gripper in metres |

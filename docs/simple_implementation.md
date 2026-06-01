@@ -1,3 +1,5 @@
+> **DEPRECATED** — superseded by [spb_node_spec.md](spb_node_spec.md). Do not update this file.
+
 # SCADA Operator's Guide — AGX Arm Bridge (ISA-95 minimum)
 
 How to operate the Piper arm from Ignition (or any Sparkplug B-aware SCADA) using

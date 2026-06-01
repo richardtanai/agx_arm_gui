@@ -13,13 +13,14 @@ arm_controller:
   tcp_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # x y z rx ry rz (m / rad)
 
 spb_bridge:
-  # Sparkplug B namespace identity (ISA-95 migration)
-  # Enterprise=DMATDTS  Area=DLSU  Site=LS  Line=Mini_Factory  Cell=agx_arm_bridge  Device=piper_arm
-  # GID = Enterprise, Node = Area, Device = Site. Line/Cell/Device live in the metric prefix
-  # applied inside spb_bridge_node.py (METRIC_PREFIX = Mini_Factory/agx_arm_bridge/piper_arm).
-  group_id: DMATDTS
-  edge_node_id: DLSU
-  device_id: LS
+  # Sparkplug B namespace identity (ISA-95)
+  # Group  = Enterprise+Area+Site+Factory: DMATDTS_DLSU_LS_MiniFactory
+  # Node   = agx_arm_bridge
+  # Device = piper_arm
+  # Full SCADA path: DMATDTS_DLSU_LS_MiniFactory/agx_arm_bridge/piper_arm/<metric>
+  group_id: DMATDTS_DLSU_LS_MiniFactory
+  edge_node_id: agx_arm_bridge
+  device_id: piper_arm
 
   # ID of the SCADA primary host we monitor on STATE/<id>.
   # If this host goes OFFLINE, the bridge enters Safe State (Halt + Aborted).
@@ -64,7 +65,7 @@ spb_bridge:
 # file (relative to waypoints_dir or absolute). target_id 0 means "play the
 # sequence currently loaded in the GUI" — handy during commissioning.
 iiot_device:
-  waypoints_dir: ~/agx_arm_ws/waypoints
+  waypoints_dir: ~/agx_arm_ws/src/agx_arm_gui/config
   default_speed: 1.0
   target_map:
     1: play.yaml

@@ -10,7 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config', ['config/gui_params.yaml', 'config/gui_secrets.example.yaml']),
-        ('lib/' + package_name, ['scripts/agx_arm_gui', 'scripts/spb_bridge_node']),
+        ('lib/' + package_name, ['scripts/agx_arm_gui', 'scripts/spb_bridge_node', 'scripts/waypoint_manager_node']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -23,6 +23,7 @@ setup(
         'console_scripts': [
             'agx_arm_gui = agx_arm_gui.main:main',
             'spb_bridge_node = agx_arm_gui.spb_bridge_node:main',
+            'waypoint_manager_node = agx_arm_gui.waypoint_manager:main',
         ],
     },
 )

@@ -1,3 +1,5 @@
+> **DEPRECATED** — superseded by [spb_node_spec.md](spb_node_spec.md). Do not update this file.
+
 I need the following features in the agx_arm_gui
 
 How to record waypoints so that I could replay this later

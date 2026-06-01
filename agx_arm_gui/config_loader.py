@@ -126,15 +126,15 @@ class AppConfig:
 
     @property
     def spb_group_id(self) -> str:
-        return _deep_get(self._d, "spb_bridge", "group_id", default="DMATDTS")
+        return _deep_get(self._d, "spb_bridge", "group_id", default="DMATDTS_DLSU_LS_MiniFactory")
 
     @property
     def spb_edge_node_id(self) -> str:
-        return _deep_get(self._d, "spb_bridge", "edge_node_id", default="DLSU")
+        return _deep_get(self._d, "spb_bridge", "edge_node_id", default="agx_arm_bridge")
 
     @property
     def spb_device_id(self) -> str:
-        return _deep_get(self._d, "spb_bridge", "device_id", default="LS")
+        return _deep_get(self._d, "spb_bridge", "device_id", default="piper_arm")
 
     @property
     def base_frame(self) -> str:

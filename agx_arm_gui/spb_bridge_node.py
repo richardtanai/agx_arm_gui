@@ -1,9 +1,9 @@
-"""Sparkplug B bridge node — minimum ISA-95 migration.
+"""Sparkplug B bridge node — ISA-95 identity.
 
 Implements the partial spec defined in docs/migration_to_isa.md:
 
-- ISA-95 identity:  GID=DMATDTS, Node=DLSU, Device=LS.
-- All device metrics live under METRIC_PREFIX = Mini_Factory/agx_arm_bridge/piper_arm.
+- ISA-95 identity:  GID=DMATDTS_DLSU_LS_MiniFactory, Node=agx_arm_bridge, Device=piper_arm.
+- Metrics published directly under the device (no additional prefix).
 - PackML state machine driven by SCADA Boolean writes to Cmd/CntrlCmd/<name>:
       Cmd/CntrlCmd/Reset, /Start, /Stop, /Clear — write True to trigger
       Status/State/Current/<name> — one-hot Booleans: /Idle, /Execute, /Complete, /Aborted
@@ -43,23 +43,17 @@ from tahu.sparkplug_b import (
 from .config_loader import load_config
 
 SPB_NAMESPACE = "spBv1.0"
-METRIC_PREFIX = "Mini_Factory/agx_arm_bridge/piper_arm"
+METRIC_PREFIX = ""  # identity is already encoded in Group/Node/Device
 
 JOINT_RATE_HZ = 10.0
 RBE_FULL_PUBLISH_PERIOD_S = 5.0
 MOTION_TIMEOUT_S = 60.0
 
-# PackML state codes (ISA-TR88) — Status/State/Current
-STATE_IDLE     = 3
-STATE_EXECUTE  = 5
-STATE_COMPLETE = 16
-STATE_ABORTED  = 8
-STATE_NAMES = {
-    STATE_IDLE:     "Idle",
-    STATE_EXECUTE:  "Execute",
-    STATE_COMPLETE: "Complete",
-    STATE_ABORTED:  "Aborted",
-}
+# One-hot Boolean state names — Status/State/Current
+STATE_IDLE     = "Idle"
+STATE_EXECUTE  = "Execute"
+STATE_COMPLETE = "Complete"
+STATE_ABORTED  = "Aborted"
 
 # One-hot Boolean sub-tags for Status/State/Current (published as DDATA on transition)
 _STATE_BOOL_TAGS = {
@@ -69,19 +63,11 @@ _STATE_BOOL_TAGS = {
     STATE_ABORTED:  "Status/State/Current/Aborted",
 }
 
-# OMAC Cmd/CntrlCmd codes — each exposed as a Boolean sub-tag; write True to trigger
-CMD_UNDEFINED = 0
-CMD_RESET     = 1
-CMD_START     = 2
-CMD_STOP      = 3
-CMD_CLEAR     = 9
-CMD_NAMES = {
-    CMD_UNDEFINED: "Undefined",
-    CMD_RESET:     "Reset",
-    CMD_START:     "Start",
-    CMD_STOP:      "Stop",
-    CMD_CLEAR:     "Clear",
-}
+# Cmd/CntrlCmd Boolean sub-tag names — write True to trigger
+CMD_RESET = "Reset"
+CMD_START = "Start"
+CMD_STOP  = "Stop"
+CMD_CLEAR = "Clear"
 
 # Boolean sub-tags for Cmd/CntrlCmd (SCADA writes True to trigger; bridge echoes False)
 _CMD_BOOL_TAGS = {
@@ -116,8 +102,7 @@ DEFAULT_TARGET_ID = 0
 
 
 def _m(suffix: str) -> str:
-    """Prepend the device metric prefix to a tag suffix."""
-    return f"{METRIC_PREFIX}/{suffix}"
+    return f"{METRIC_PREFIX}/{suffix}" if METRIC_PREFIX else suffix
 
 
 # Populate the reverse-lookup now that _m() is available.
@@ -181,7 +166,7 @@ class SpbBridgeNode(Node):
         self._STATE_TOPIC  = f"{_ns}/STATE/{self._primary_host_id}"
 
         # ── Runtime state ──────────────────────────────────────────────
-        self._state: int = STATE_IDLE
+        self._state: str = STATE_IDLE
         self._heartbeat: bool = False
         self._connected: bool = False
         self._primary_seen: bool = False
@@ -464,13 +449,18 @@ class SpbBridgeNode(Node):
                     continue
                 code = _CMD_BOOL_NAMES[name]
                 self.get_logger().info(
-                    f"DCMD Cmd/CntrlCmd/{CMD_NAMES.get(code, '?')}=True | "
-                    f"state={self._state} ({STATE_NAMES.get(self._state, '?')}) | "
+                    f"DCMD Cmd/CntrlCmd/{code}=True | "
+                    f"state={self._state} | "
                     f"target_id={self._target_id}"
                 )
+                # Echo True — confirms command received.
+                self._publish_ddata({name: (MetricDataType.Boolean, True)})
                 self._execute_cntrl_cmd(code)
-                # Echo False after acting so the SCADA tag resets automatically.
-                self._publish_ddata({name: (MetricDataType.Boolean, False)})
+                # Echo False for all cmd tags — one-hot reset so SCADA tag browser is clean.
+                self._publish_ddata({
+                    _m(suffix): (MetricDataType.Boolean, False)
+                    for suffix in _CMD_BOOL_TAGS.values()
+                })
 
             elif name == target_name:
                 try:
@@ -487,25 +477,20 @@ class SpbBridgeNode(Node):
             else:
                 self.get_logger().warn(f"DCMD ignored (unknown metric): {name}")
 
-    def _execute_cntrl_cmd(self, code: int):
-        if code == CMD_UNDEFINED:
-            return
-
+    def _execute_cntrl_cmd(self, code: str):
         if code == CMD_RESET:
             if self._state == STATE_COMPLETE:
                 self._set_state(STATE_IDLE)
             else:
                 self.get_logger().warn(
-                    f"Reset ignored: state must be Complete "
-                    f"(got {STATE_NAMES.get(self._state)})"
+                    f"Reset ignored: state must be Complete (got {self._state})"
                 )
             return
 
         if code == CMD_START:
             if self._state != STATE_IDLE:
                 self.get_logger().warn(
-                    f"Start ignored: state must be Idle "
-                    f"(got {STATE_NAMES.get(self._state)})"
+                    f"Start ignored: state must be Idle (got {self._state})"
                 )
                 return
             if self._active_alarm_count() > 0:
@@ -525,8 +510,7 @@ class SpbBridgeNode(Node):
         if code == CMD_CLEAR:
             if self._state != STATE_ABORTED:
                 self.get_logger().warn(
-                    f"Clear ignored: state must be Aborted "
-                    f"(got {STATE_NAMES.get(self._state)})"
+                    f"Clear ignored: state must be Aborted (got {self._state})"
                 )
                 return
             for c in list(self._alarm_states.keys()):
@@ -541,13 +525,10 @@ class SpbBridgeNode(Node):
     # PackML state transitions & cycle lifecycle
     # ------------------------------------------------------------------
 
-    def _set_state(self, new_state: int):
+    def _set_state(self, new_state: str):
         if new_state == self._state:
             return
-        self.get_logger().info(
-            f"State: {STATE_NAMES.get(self._state, '?')}({self._state}) "
-            f"→ {STATE_NAMES.get(new_state, '?')}({new_state})"
-        )
+        self.get_logger().info(f"State: {self._state} → {new_state}")
         self._state = new_state
         self._publish_ddata({
             _m(suffix): (MetricDataType.Boolean, new_state == state_code)

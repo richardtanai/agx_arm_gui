@@ -66,7 +66,39 @@ sudo apt install -y ros-humble-moveit
 
 ---
 
-### Step 2 — Python packages (pip, system-level)
+### Step 2 — USB-CAN adapter udev rule (passwordless, plug-and-play)
+
+The GUI activates the CAN interface by running `can_activate.sh` via `sudo`. Adding a udev rule removes the password prompt entirely and brings the interface up automatically every time the adapter is plugged in — no GUI interaction required.
+
+This targets the **candleLight USB-CAN adapter** (`bytewerk 1d50:606f`, `gs_usb` driver). Run once after the adapter has been plugged in at least once:
+
+```bash
+sudo tee /etc/udev/rules.d/80-can0.rules << 'EOF'
+# candleLight USB-CAN adapter (bytewerk 1d50:606f, gs_usb driver)
+# Automatically names can0, sets 1 Mbit/s, and brings it up on plug-in.
+SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", \
+  NAME="can0", \
+  RUN+="/sbin/ip link set can0 type can bitrate 1000000", \
+  RUN+="/sbin/ip link set can0 up"
+EOF
+
+sudo udevadm control --reload-rules
+```
+
+After this, plug the adapter in and verify:
+
+```bash
+ip link show can0
+# Expected: flags include <NOARP,UP,LOWER_UP,ECHO>
+```
+
+> **Behaviour:** plug in → `can0` is up automatically; unplug → interface disappears cleanly. The GUI's **Activate CAN** button still works as a manual fallback.
+
+> **Different adapter?** Run `udevadm info /sys/class/net/can0 | grep -E "ID_VENDOR_ID|ID_MODEL_ID"` while it is plugged in to find the correct `idVendor`/`idProduct` values.
+
+---
+
+### Step 3 — Python packages (pip, system-level)
 
 > **Why system-level?** The ROS node (`spb_bridge_node`) is launched by the GUI as a subprocess that inherits the system Python, not a virtualenv. All three packages must be visible to `python3` without any environment activation.
 
@@ -91,7 +123,7 @@ pip3 install --break-system-packages \
 
 ---
 
-### Step 3 — Workspace packages
+### Step 4 — Workspace packages
 
 Clone `agx_arm_ros` into the same workspace as `agx_arm_gui`. It provides the arm controller, MoveIt config, URDF, and the `agx_arm_msgs` message definitions that the bridge depends on.
 
@@ -111,7 +143,7 @@ The workspace must contain these four packages (all inside `agx_arm_ros/src/`):
 
 ---
 
-### Step 4 — Build
+### Step 5 — Build
 
 ```bash
 cd ~/agx_arm_ws
@@ -130,7 +162,7 @@ source install/setup.bash
 
 ---
 
-### Step 5 — MQTT broker
+### Step 6 — MQTT broker
 
 The Sparkplug B bridge requires an MQTT broker. For local development, Mosquitto is the simplest option:
 
@@ -143,7 +175,7 @@ For production or HiveMQ Cloud, see the `hivemq` section of [config/gui_params.y
 
 ---
 
-### Step 6 — Configuration
+### Step 7 — Configuration
 
 **Copy and edit the secrets file:**
 
@@ -296,13 +328,8 @@ For the full SCADA integration contract see [docs/simple_implementation.md](#doc
 
 | File | Audience | Contents |
 |---|---|---|
-| [docs/simple_implementation.md](docs/simple_implementation.md) | SCADA operator / integrator | Step-by-step operating guide — pre-flight, PackML cycle, alarm recovery, worked example |
-| [docs/scada_integration.md](docs/scada_integration.md) | SCADA / MES engineer | Full Sparkplug B data model spec — all metrics, alarm catalogue, deadbands, handshake sequences for the whole packaging line |
-| [docs/spb_node_spec.md](docs/spb_node_spec.md) | Developer | Sparkplug B bridge node specification — metric layout, state machine, RBE rules, topic contract |
-| [docs/iiot_node_design.md](docs/iiot_node_design.md) | Developer | IIoT device mode design — WaypointManager feature requirements and ROS topic protocol |
+| [docs/spb_node_spec.md](docs/spb_node_spec.md) | All | **Current authoritative spec** — ISA-95 identity, full tag tree, PackML state machine, alarm catalogue, ROS interface, configuration reference |
 | [docs/gui_design.md](docs/gui_design.md) | Developer | GUI architecture — panel layout, process lifecycle, Qt/rclpy threading model |
-| [docs/migration_to_isa.md](docs/migration_to_isa.md) | Developer | ISA-95 migration spec — GID/Node/Device remapping, metric prefix, Boolean tag decisions |
-| [docs/mqtt_spb_link.md](docs/mqtt_spb_link.md) | Developer | MQTT/Sparkplug B concept notes — UNS layout, ISA-95 vs SpB topology, southbound command routing |
 
 ---
 
@@ -386,7 +413,7 @@ agx_arm_gui/
 | **"GripperStatus unavailable" in log** | The `agx_arm_msgs` overlay is not sourced — gripper width won't be recorded but the rest works. Run `source ~/agx_arm_ws/install/setup.bash`. |
 | **`tahu` import error on bridge start** | `pip3 install tahu` was not done at system level. Re-run the pip step in §Step 2 and ensure you used `--break-system-packages`. |
 | **`paho.mqtt` version error** | Requires `paho-mqtt>=2.0`. Run `pip3 install --upgrade --break-system-packages paho-mqtt`. |
-| **CAN interface not found** | Check `ip link show | grep can`. The USB-CAN adapter may need `sudo modprobe gs_usb`. |
+| **CAN interface not found** | Check `ip link show \| grep can`. If the udev rule (Step 2) is in place, the interface comes up on plug-in. Otherwise run `sudo modprobe gs_usb` then `sudo bash can_activate.sh can0`. |
 
 ---
 

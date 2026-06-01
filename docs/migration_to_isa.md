@@ -1,3 +1,5 @@
+> **DEPRECATED** — superseded by [spb_node_spec.md](spb_node_spec.md). Do not update this file.
+
 We will be migrating the node to the full ISA95 tag naming
 
 Enterprise = DMATDTS
