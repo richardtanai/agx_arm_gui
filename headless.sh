@@ -13,7 +13,7 @@
 #   bash headless.sh
 #   bash headless.sh --sim     # simulation mode (no CAN hardware required)
 
-set -euo pipefail
+set -eo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WORKSPACE="${HOME}/agx_arm_ws"

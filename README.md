@@ -9,10 +9,11 @@ A PyQt5 dashboard for the Agilex Piper arm. Manages CAN, the arm controller, Mov
 | Panel | Purpose |
 |---|---|
 | **CAN Bus Management** | Brings up the CAN interface via `can_activate.sh` and watches `/sys/class/net/<iface>/operstate`. |
-| **Launch Control** | Starts/stops the arm controller, MoveIt2, and the Sparkplug B bridge with the right launch arguments. |
-| **Waypoint Recorder & Playback** | Snapshots `feedback/joint_states` + `feedback/gripper_status` into a YAML file, replays it through `control/joint_states` with a 0.10×–2.00× speed slider. |
+| **Launch Control** | Starts/stops the arm controller, MoveIt2, and the Sparkplug B bridge. Includes arm type, effector, TCP offset, and inline broker configuration. |
+| **Waypoint Recorder & Playback** | Snapshots `feedback/joint_states` + `feedback/gripper_status` into a YAML file, replays it through the `FollowJointTrajectory` action with a 0.10×–2.00× speed slider. |
 | **IIoT Device Mode** | Toggle inside the Waypoint panel. When ON, the GUI plays back a sequence in response to a Sparkplug B DCMD from a SCADA host and reports state via ISA-95 Boolean tags. |
 | **Log Console** | Aggregates stdout/stderr from every managed process. |
+| **Simulation Mode** | Header checkbox. Marks CAN as virtual-UP and applies an amber colour theme — lets you exercise the GUI and ROS graph without physical hardware. |
 
 ---
 
@@ -100,7 +101,7 @@ ip link show can0
 
 ### Step 3 — Python packages (pip, system-level)
 
-> **Why system-level?** The ROS node (`spb_bridge_node`) is launched by the GUI as a subprocess that inherits the system Python, not a virtualenv. All three packages must be visible to `python3` without any environment activation.
+> **Why system-level?** The ROS node (`spb_bridge_node`) is launched by the GUI as a subprocess that inherits the system Python, not a virtualenv. All packages must be visible to `python3` without any environment activation.
 
 ```bash
 pip3 install --break-system-packages \
@@ -171,7 +172,7 @@ sudo apt install -y mosquitto mosquitto-clients
 sudo systemctl enable --now mosquitto
 ```
 
-For production or HiveMQ Cloud, see the `hivemq` section of [config/gui_params.yaml](config/gui_params.yaml).
+For HiveMQ Cloud, fill in the host/credentials in the GUI's broker fields or in `config/gui_secrets.yaml`.
 
 ---
 
@@ -203,15 +204,24 @@ can:
 arm_controller:
   arm_type: piper                  # piper | piper_x | piper_l | piper_h | nero
   effector_type: agx_gripper       # none | agx_gripper | revo2
+  revo2_side: left                 # left | right (only when effector_type is revo2)
+  tcp_offset: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # x y z rx ry rz (m / rad)
 
 spb_bridge:
-  group_id: DMATDTS                # Sparkplug B / ISA-95 identity (see docs below)
-  edge_node_id: DLSU
-  device_id: LS
-  primary_host_id: IgnitionPrimary # Must match the Ignition gateway name
+  group_id: DMATDTS_DLSU_LS_MiniFactory   # Sparkplug B / ISA-95 identity
+  edge_node_id: agx_arm_bridge
+  device_id: piper_arm
+  primary_host_id: IgnitionPrimary        # Must match the Ignition gateway name
+
+  # TF frames for end-effector pose in SCADA telemetry
+  base_frame: base_link
+  ee_frame: gripper_base                  # link6 | gripper_base | revo2_flange
+
+  broker_type: local                      # local | hivemq
 
 iiot_device:
   waypoints_dir: ~/agx_arm_ws/waypoints
+  default_speed: 1.0
   target_map:
     1: pick.yaml
     2: place.yaml
@@ -238,19 +248,46 @@ The window opens with three tiers: process control (top), Waypoint Recorder & Pl
 
 ---
 
+## Running headless (no GUI)
+
+`headless.sh` launches the arm controller, MoveIt2, SPB bridge, and WaypointManager in IIoT device mode without the Qt window — useful for production deployments or SSH-only machines:
+
+```bash
+bash ~/agx_arm_ws/src/agx_arm_gui/headless.sh          # physical hardware
+bash ~/agx_arm_ws/src/agx_arm_gui/headless.sh --sim    # simulation (no CAN required)
+```
+
+Broker credentials and waypoint paths are read automatically from `gui_params.yaml` + `gui_secrets.yaml`. Press Ctrl+C to stop all processes cleanly.
+
+---
+
 ## Using the GUI
+
+### Simulation Mode
+
+Tick **Simulated Mode** in the header at any time. This:
+
+- Marks the selected CAN interface as virtual-UP (skips the `can_activate.sh` call).
+- Applies an amber colour theme so you can tell at a glance that hardware is not active.
+- Passes `sim_mode:=true` to the arm controller and MoveIt2 launches, which skips the CAN driver.
+
+Use simulation mode to exercise waypoint recording, playback, and IIoT logic without a physical arm.
+
+---
 
 ### Bring-up sequence
 
-1. **CAN Bus** row → click **Activate**. The status indicator turns green when `/sys/class/net/can0/operstate` reads `up`. If the indicator stays red, check the USB-CAN adapter is plugged in and run `ip link show can0`.
+1. **CAN Bus** row → click **Activate**. The status indicator turns green when `/sys/class/net/can0/operstate` reads `up`. If the indicator stays red, check the USB-CAN adapter is plugged in and run `ip link show can0`. (In simulation mode this step is automatic.)
 
-2. **Arm Controller** row → click **Launch**. Wait until the log shows `Arm Controller ready`.
+2. **Arm type / Effector** — select the arm model and end-effector. For `revo2`, a **Side** dropdown appears. Edit the **TCP Offset** spinboxes if your tool has a known offset from the flange (x, y, z in metres; rx, ry, rz in radians).
 
-3. **Arm Controller** row → click **Enable**. This calls the `/enable_agx_arm` service. **The arm silently drops all commands until this is done.**
+3. **Arm Controller** row → click **Launch**. Wait until the log shows `Arm Controller ready`.
 
-4. *(Optional)* **MoveIt2** row → click **Launch**. Required if you want RViz visualisation or inverse-kinematics-based motion. Wait for `move_group` to appear in `ros2 node list`.
+4. **Arm Controller** row → click **Enable**. This calls the `/enable_agx_arm` service. **The arm silently drops all commands until this is done.**
 
-5. *(Optional)* **SPB Bridge** row → click **Launch** if SCADA/IIoT integration is needed.
+5. *(Optional)* **MoveIt2** row → click **Launch**. Required for RViz visualisation or IK-based motion. Wait for `move_group` to appear in `ros2 node list`. Playback always waits for the `FollowJointTrajectory` action server — ensure MoveIt is up before clicking Play.
+
+6. *(Optional)* **SPB Bridge** row → select your broker type (Local MQTT or HiveMQ Cloud), fill in host / port / credentials / TLS, then click **Launch** if SCADA/IIoT integration is needed.
 
 ---
 
@@ -259,19 +296,17 @@ The window opens with three tiers: process control (top), Waypoint Recorder & Pl
 1. Jog the arm to the first pose (hand-guide or jog service).
 2. Click **Record Waypoint** — the current joint angles and gripper width are added to the table.
 3. Repeat for each pose. Edit the **Hold (s)** column inline to set dwell time at each waypoint.
-4. Click **Save YAML…** — saves to `~/agx_arm_ws/waypoints/` by default.
-5. Click **▶ Play** to replay. Use the **Speed** slider (0.10×–2.00×) to scale all hold times live.
-6. Click **Stop** to cancel playback. Click **Move to Home** to park the arm in the home pose.
+4. To remove individual waypoints, select rows and click **Delete Selected**. To start over, click **Clear All**.
+5. Click **Save YAML…** — saves to `~/agx_arm_ws/waypoints/` by default.
+6. Click **▶ Play** to replay. Use the **Speed** slider (0.10×–2.00×) to scale all hold times live.
+7. Click **Pause** / **Resume** to hold mid-sequence without cancelling. Click **Stop** to cancel.
+8. Click **Move to Home** to park the arm in the home pose.
 
-**Transport selection at playback:**
+**Playback transport:**
 
-| Setup | Transport used |
-|---|---|
-| Arm Controller only (no MoveIt) | Direct publish on `control/joint_states` |
-| Arm Controller + MoveIt2 | `/arm_controller/follow_joint_trajectory` action |
-| MoveIt2 only (sim) | `/arm_controller/follow_joint_trajectory` action |
+Playback always uses the `/arm_controller/follow_joint_trajectory` action server (provided by the controller stack started alongside MoveIt2). If the action server is not ready within 2 s of pressing Play, playback fails with an error message. Launch the arm controller and MoveIt2 first, and ensure the arm is enabled.
 
-The log line at playback start tells you which transport was chosen. If it says "no way to move the arm", launch the Arm Controller (and Enable it) first.
+The arm joints (`joint1`–`joint6`) are sent to `arm_controller`; the gripper is dispatched in parallel to `gripper_controller` (if its action server is up) or via a single-joint message on `control/joint_states` as a fallback.
 
 **Waypoint YAML schema:**
 
@@ -296,7 +331,8 @@ The bridge node then listens for Sparkplug B DCMDs from the SCADA primary host:
 
 | DCMD write | Effect |
 |---|---|
-| `Cmd/TargetID = <n>` | Select which waypoint YAML to play (matched against `iiot_device.target_map`) |
+| `Cmd/TargetID = 0` | Use the sequence **currently loaded** in the GUI |
+| `Cmd/TargetID = <n>` | Select waypoint YAML via `iiot_device.target_map` (n ≥ 1) |
 | `Cmd/CntrlCmd/Start = true` | Begin playback of the selected sequence |
 | `Cmd/CntrlCmd/Stop = true` | Halt playback immediately |
 | `Cmd/CntrlCmd/Reset = true` | Acknowledge cycle Complete → return to Idle |
@@ -309,6 +345,13 @@ Status/State/Current/Idle      — true when ready for a new cycle
 Status/State/Current/Execute   — true while playing a sequence
 Status/State/Current/Complete  — true when sequence finished cleanly
 Status/State/Current/Aborted   — true on fault (see alarm tags)
+```
+
+**Bench test without Ignition:** use the **Target:** spinner next to the IIoT toggle to set a target ID, then publish a trigger directly:
+
+```bash
+ros2 topic pub --once /iiot/execute std_msgs/Int32 "data: 1"
+ros2 topic echo iiot/status
 ```
 
 For the full SCADA integration contract see [docs/simple_implementation.md](#documentation).
@@ -337,14 +380,16 @@ For the full SCADA integration contract see [docs/simple_implementation.md](#doc
 
 | Topic | Type | Direction | Notes |
 |---|---|---|---|
-| `iiot/execute` | `std_msgs/Int32` | bridge → manager | Target ID to play |
+| `iiot/execute` | `std_msgs/Int32` | bridge → manager | Target ID to play (0 = current sequence) |
 | `iiot/halt` | `std_msgs/Empty` | bridge → manager | Cancel current playback |
 | `iiot/status` | `std_msgs/String` | manager → bridge | `ready` / `started:N` / `progress:i/t` / `complete:N` / `aborted:N` / `error:msg` |
+| `iiot/target_waypoint` | `std_msgs/String` | manager → bridge | JSON pose of the current target waypoint (index, joint names, positions, gripper width) — mirrored to SCADA as `Positions/Target/*` metrics |
 
 Debug a stuck handshake without touching the broker:
 
 ```bash
 ros2 topic echo iiot/status
+ros2 topic echo iiot/target_waypoint
 ```
 
 ---
@@ -367,7 +412,7 @@ Alternatively, publish a real Sparkplug B DCMD with `mosquitto_pub` and the Tahu
 
 ```bash
 # Confirm the bridge is subscribed
-mosquitto_sub -t "spBv1.0/DMATDTS/DCMD/DLSU/LS" -v
+mosquitto_sub -t "spBv1.0/DMATDTS_DLSU_LS_MiniFactory/DCMD/agx_arm_bridge/piper_arm" -v
 ```
 
 ---
@@ -395,7 +440,11 @@ agx_arm_gui/
 │   ├── waypoint_manager.py       # rclpy node — record / save / load / play / IIoT
 │   ├── waypoint_panel.py         # Qt panel for waypoints + IIoT toggle
 │   └── spb_bridge_node.py        # Sparkplug B bridge — RBE, PackML state, alarms
-└── scripts/                      # Entry-point shims (installed by colcon)
+├── scripts/
+│   ├── agx_arm_gui               # GUI entry point
+│   ├── spb_bridge_node           # Bridge node entry point
+│   └── waypoint_manager_node     # Headless IIoT WaypointManager entry point
+└── headless.sh                   # Headless startup script (no Qt required)
 ```
 
 ---
@@ -405,13 +454,13 @@ agx_arm_gui/
 | Symptom | Fix |
 |---|---|
 | **Arm doesn't move after Play** | Click **Enable** next to the Arm Controller row. Without it the controller silently drops every command. |
-| **Play with MoveIt: arm doesn't move** | Wait until `ros2 action list` shows `/arm_controller/follow_joint_trajectory`, then retry. |
-| **"no way to move the arm" in log** | Neither transport is up. Launch and Enable the Arm Controller (or launch MoveIt first). |
-| **SPB bridge keeps reconnecting** | Another `spb_bridge_node` process is running with the same client ID. Find it: `pgrep -af spb_bridge_node` and kill it. |
-| **`iiot/status` reports `error:no_sequence`** | `TargetID` not in `iiot_device.target_map`, or the YAML file is missing. |
+| **Play fails: "FollowJointTrajectory action not available"** | MoveIt2 is not running or still starting up. Wait for `ros2 action list` to show `/arm_controller/follow_joint_trajectory`, then retry. |
+| **"no way to move the arm" in log** | The `FollowJointTrajectory` action is not available and no subscriber is on `control/joint_states`. Launch and Enable the Arm Controller, then launch MoveIt2. |
+| **SPB bridge keeps reconnecting** | Another `spb_bridge_node` process is running with the same client ID. Find it: `pgrep -af spb_bridge_node` and kill it. The GUI will sweep orphans automatically on the next bridge launch. |
+| **`iiot/status` reports `error:no_sequence`** | `TargetID` not in `iiot_device.target_map`, or the YAML file is missing from `waypoints_dir`. |
 | **`PrimaryHostOffline` alarm on launch** | Bridge reached the broker but never saw `STATE/IgnitionPrimary = ONLINE`. Verify `primary_host_id` matches your Ignition gateway name and that the Primary Host is enabled in Ignition. |
 | **"GripperStatus unavailable" in log** | The `agx_arm_msgs` overlay is not sourced — gripper width won't be recorded but the rest works. Run `source ~/agx_arm_ws/install/setup.bash`. |
-| **`tahu` import error on bridge start** | `pip3 install tahu` was not done at system level. Re-run the pip step in §Step 2 and ensure you used `--break-system-packages`. |
+| **`tahu` import error on bridge start** | `pip3 install tahu` was not done at system level. Re-run the pip step in §Step 3 and ensure you used `--break-system-packages`. |
 | **`paho.mqtt` version error** | Requires `paho-mqtt>=2.0`. Run `pip3 install --upgrade --break-system-packages paho-mqtt`. |
 | **CAN interface not found** | Check `ip link show \| grep can`. If the udev rule (Step 2) is in place, the interface comes up on plug-in. Otherwise run `sudo modprobe gs_usb` then `sudo bash can_activate.sh can0`. |
 
