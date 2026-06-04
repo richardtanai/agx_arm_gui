@@ -97,6 +97,50 @@ ip link show can0
 
 > **Different adapter?** Run `udevadm info /sys/class/net/can0 | grep -E "ID_VENDOR_ID|ID_MODEL_ID"` while it is plugged in to find the correct `idVendor`/`idProduct` values.
 
+#### Manual bring-up (without the udev rule or GUI)
+
+**Option A — use `can_activate.sh` directly:**
+
+The script auto-detects the single CAN adapter, names it `can0`, and sets 1 Mbit/s:
+
+```bash
+sudo bash ~/agx_arm_ws/src/agx_arm_ros/scripts/can_activate.sh
+```
+
+You can override the interface name, bitrate, or target USB port:
+
+```bash
+# Custom name and bitrate
+sudo bash can_activate.sh can0 1000000
+
+# Multiple adapters — specify which USB port to use
+# Find the port with: sudo ethtool -i <iface> | grep bus-info
+sudo bash can_activate.sh can0 1000000 1-2:1.0
+```
+
+If more than one CAN adapter is plugged in and no USB address is given, the script lists the detected ports and exits with an error.
+
+**Option B — raw `ip link` commands:**
+
+```bash
+sudo modprobe gs_usb                              # load the driver if not auto-loaded
+sudo ip link set can0 down                        # must be down before changing bitrate
+sudo ip link set can0 type can bitrate 1000000    # set bitrate
+sudo ip link set can0 up                          # bring up
+
+# Verify
+ip link show can0
+# flags should include <NOARP,UP,LOWER_UP,ECHO>
+```
+
+To bring it back down cleanly:
+
+```bash
+sudo ip link set can0 down
+```
+
+> `RTNETLINK answers: Device or resource busy` means the interface is already UP. Run `sudo ip link set can0 down` first, then retry the bitrate and up commands.
+
 ---
 
 ### Step 3 — Python packages (pip, system-level)
@@ -253,11 +297,24 @@ The window opens with three tiers: process control (top), Waypoint Recorder & Pl
 `headless.sh` launches the arm controller, MoveIt2, SPB bridge, and WaypointManager in IIoT device mode without the Qt window — useful for production deployments or SSH-only machines:
 
 ```bash
-bash ~/agx_arm_ws/src/agx_arm_gui/headless.sh          # physical hardware
-bash ~/agx_arm_ws/src/agx_arm_gui/headless.sh --sim    # simulation (no CAN required)
+bash ~/agx_arm_ws/src/agx_arm_gui/headless.sh                    # local MQTT (default)
+bash ~/agx_arm_ws/src/agx_arm_gui/headless.sh --hivemq           # HiveMQ Cloud
+bash ~/agx_arm_ws/src/agx_arm_gui/headless.sh --sim              # simulation, local MQTT
+bash ~/agx_arm_ws/src/agx_arm_gui/headless.sh --hivemq --sim     # HiveMQ + simulation
 ```
 
-Broker credentials and waypoint paths are read automatically from `gui_params.yaml` + `gui_secrets.yaml`. Press Ctrl+C to stop all processes cleanly.
+The script replicates the full GUI bring-up sequence:
+
+1. Calls `can_activate.sh` to bring up the CAN interface (same script the GUI uses)
+2. Launches the arm controller and waits for the node to appear
+3. Enables the arm via `/enable_agx_arm`
+4. Launches MoveIt2 (no RViz) and waits for the trajectory action server
+5. Launches the SPB bridge with the resolved broker config
+6. Launches `waypoint_manager_node` in IIoT device mode (target map from `gui_params.yaml`)
+
+`--hivemq` overrides `broker_type` in `gui_params.yaml` and reads the host, port, TLS, and credentials from the `spb_bridge.hivemq` section of `gui_secrets.yaml`. Without the flag the script uses whatever `broker_type` is set to in `gui_params.yaml`.
+
+Press Ctrl+C to stop all processes cleanly.
 
 ---
 
@@ -462,6 +519,10 @@ agx_arm_gui/
 | **"GripperStatus unavailable" in log** | The `agx_arm_msgs` overlay is not sourced — gripper width won't be recorded but the rest works. Run `source ~/agx_arm_ws/install/setup.bash`. |
 | **`tahu` import error on bridge start** | `pip3 install tahu` was not done at system level. Re-run the pip step in §Step 3 and ensure you used `--break-system-packages`. |
 | **`paho.mqtt` version error** | Requires `paho-mqtt>=2.0`. Run `pip3 install --upgrade --break-system-packages paho-mqtt`. |
+| **`No such file or directory: piper_with_gripper_description.xacro`** | `agx_arm_description` (or `agx_arm_moveit`) was not built or the install overlay was not sourced. Run `colcon build --packages-select agx_arm_description agx_arm_moveit` then `source install/setup.bash`. |
+| **`Cannot infer SRDF from .../agx_arm_moveit` — using config/agx_arm.srdf`** | MoveIt fell back to the bundled SRDF because the installed share path didn't contain one. Usually harmless, but if MoveIt fails to plan, confirm `agx_arm_moveit` built cleanly and re-source. |
+| **`Timeout waiting for arm to enable` / `Failed to get firmware version`** | The arm controller cannot talk to the hardware over CAN. Check that `can0` is UP (`ip link show can0`) and at 1 Mbit/s. If not, bring it up manually (see Step 2) before launching the arm controller. |
+| **`RTNETLINK answers: Device or resource busy`** | The interface is already UP. Run `sudo ip link set can0 down` first, then retry the bitrate and up commands. |
 | **CAN interface not found** | Check `ip link show \| grep can`. If the udev rule (Step 2) is in place, the interface comes up on plug-in. Otherwise run `sudo modprobe gs_usb` then `sudo bash can_activate.sh can0`. |
 
 ---

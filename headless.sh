@@ -10,8 +10,10 @@
 #   - Workspace built:  colcon build --packages-select agx_arm_gui
 #
 # Usage:
-#   bash headless.sh
-#   bash headless.sh --sim     # simulation mode (no CAN hardware required)
+#   bash headless.sh                       # local MQTT broker (default)
+#   bash headless.sh --hivemq              # HiveMQ Cloud broker
+#   bash headless.sh --sim                 # simulation mode (no CAN hardware required)
+#   bash headless.sh --hivemq --sim        # HiveMQ + simulation
 
 set -eo pipefail
 
@@ -23,11 +25,14 @@ EFFECTOR_TYPE="agx_gripper"
 CAN_PORT="can0"
 TCP_OFFSET="[0.0,0.0,0.0,0.0,0.0,0.0]"
 SIM_MODE=false
+BROKER_TYPE=""   # empty = use broker_type from gui_params.yaml; "hivemq" or "local" to override
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 for arg in "$@"; do
     case "$arg" in
-        --sim) SIM_MODE=true ;;
+        --sim)    SIM_MODE=true ;;
+        --hivemq) BROKER_TYPE=hivemq ;;
+        --local)  BROKER_TYPE=local ;;
         *) echo "Unknown argument: $arg"; exit 1 ;;
     esac
 done
@@ -57,13 +62,39 @@ source /opt/ros/humble/setup.bash
 # shellcheck disable=SC1091
 source "${WORKSPACE}/install/setup.bash"
 
-# ── CAN check ────────────────────────────────────────────────────────────────
+# ── Resolve broker config from gui_params.yaml + gui_secrets.yaml ────────────
+# Uses the same config_loader the GUI uses so secrets are merged automatically.
+eval "$(python3 -c "
+import shlex, os
+os.environ.get('BROKER_TYPE') and None  # unused — we pass via shell var below
+from agx_arm_gui.config_loader import load_config
+cfg = load_config()
+broker_type = '${BROKER_TYPE}' or cfg.broker_type
+b = cfg.hivemq_broker if broker_type == 'hivemq' else cfg.local_broker
+print('SPB_HOST=' + shlex.quote(b.host))
+print('SPB_PORT=' + str(b.port))
+print('SPB_TLS=' + str(b.use_tls).lower())
+print('SPB_USER=' + shlex.quote(b.username))
+print('SPB_PASS=' + shlex.quote(b.password))
+print('SPB_BROKER_TYPE=' + shlex.quote(broker_type))
+")" || die "Failed to read broker config from gui_params.yaml / gui_secrets.yaml"
+
+[ -z "$SPB_HOST" ] && die "Broker host is empty. Fill in gui_secrets.yaml (see README Step 7)."
+
+# ── CAN activation ───────────────────────────────────────────────────────────
 if [ "$SIM_MODE" = false ]; then
-    log "Checking ${CAN_IFACE}..."
+    CAN_SCRIPT="$(python3 -c "
+from agx_arm_gui.config_loader import load_config
+print(load_config().can_script)
+" 2>/dev/null)"
+    [ -z "$CAN_SCRIPT" ] && CAN_SCRIPT="${WORKSPACE}/src/agx_arm_ros/scripts/can_activate.sh"
+
+    log "Activating ${CAN_IFACE} via ${CAN_SCRIPT} ..."
+    sudo bash "${CAN_SCRIPT}" "${CAN_IFACE}" \
+        || die "can_activate.sh failed — check that the USB-CAN adapter is plugged in."
+
     STATE=$(cat "/sys/class/net/${CAN_IFACE}/operstate" 2>/dev/null || echo "missing")
-    if [ "$STATE" != "up" ]; then
-        die "${CAN_IFACE} is not up (state='${STATE}'). Plug in the USB-CAN adapter."
-    fi
+    [ "$STATE" = "up" ] || die "${CAN_IFACE} still not up after activation (state='${STATE}')."
     log "${CAN_IFACE} is up."
 fi
 
@@ -123,9 +154,21 @@ if [ "$SIM_MODE" = false ]; then
 fi
 
 # ── Sparkplug B bridge ────────────────────────────────────────────────────────
-# Broker host / credentials are read from gui_params.yaml + gui_secrets.yaml.
-log "Launching Sparkplug B bridge..."
-ros2 run agx_arm_gui spb_bridge_node &
+log "Launching Sparkplug B bridge (${SPB_BROKER_TYPE}: ${SPB_HOST}:${SPB_PORT}, TLS=${SPB_TLS})..."
+SPB_CMD=(
+    ros2 run agx_arm_gui spb_bridge_node
+    --ros-args
+    -p "mqtt_host:=${SPB_HOST}"
+    -p "mqtt_port:=${SPB_PORT}"
+    -p "use_tls:=${SPB_TLS}"
+    -p "sim_mode:=$([ "$SIM_MODE" = true ] && echo true || echo false)"
+)
+[ -n "$SPB_USER" ] && SPB_CMD+=(
+    -p "mqtt_username:=${SPB_USER}"
+    -p "mqtt_password:=${SPB_PASS}"
+)
+
+"${SPB_CMD[@]}" &
 PIDS+=($!)
 log "SPB bridge PID: ${PIDS[-1]}"
 
@@ -145,10 +188,6 @@ from agx_arm_gui.config_loader import load_config
 c = load_config()
 print(f'{c.spb_group_id} / {c.spb_edge_node_id} / {c.spb_device_id}')
 " 2>/dev/null || echo "(config unreadable)")"
-log "  Broker       : $(python3 -c "
-from agx_arm_gui.config_loader import load_config
-b = load_config().active_broker()
-print(f'{b.host}:{b.port} (TLS={b.use_tls})')
-" 2>/dev/null || echo "(config unreadable)")"
+log "  Broker       : ${SPB_BROKER_TYPE} — ${SPB_HOST}:${SPB_PORT} (TLS=${SPB_TLS})"
 
 wait
