@@ -25,8 +25,15 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Int32, Empty, String
+from std_msgs.msg import Bool, Int32, Empty, String
+
+_TRANSIENT_LOCAL_QOS = QoSProfile(
+    depth=1,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=ReliabilityPolicy.RELIABLE,
+)
 
 import paho.mqtt.client as mqtt
 
@@ -173,6 +180,8 @@ class SpbBridgeNode(Node):
         self._primary_online: bool = False
         self._iiot_in_flight: bool = False
         self._target_id: int = DEFAULT_TARGET_ID
+        # OMAC PackML command authority: False=Manual/local panel, True=Auto/SCADA
+        self._remote_mode: bool = False
 
         self._alarm_states: dict = {c: ALARM_NORMAL for c in ALARM_DEFINITIONS}
         self._alarm_onsets: dict = {c: 0 for c in ALARM_DEFINITIONS}
@@ -242,6 +251,22 @@ class SpbBridgeNode(Node):
         self._iiot_halt_pub    = self.create_publisher(Empty, "iiot/halt",    10)
         self.create_subscription(String, "iiot/status", self._iiot_status_cb, 10)
 
+        # ── Panel integration ───────────────────────────────────────────
+        # arm/state: TRANSIENT_LOCAL so panel_node gets the current state
+        # immediately on subscribe (even if no transition has happened yet).
+        self._arm_state_pub = self.create_publisher(
+            String, "arm/state", _TRANSIENT_LOCAL_QOS
+        )
+        self.create_subscription(String, "panel/cmd",   self._panel_cmd_cb,   10)
+        self.create_subscription(Bool,   "panel/estop", self._panel_estop_cb, 10)
+        self.create_subscription(String, "panel/mode",  self._panel_mode_cb,  10)
+
+        # Seed the TRANSIENT_LOCAL topic with the initial state so panel_node
+        # gets it on its first subscription without waiting for a transition.
+        _init_state_msg = String()
+        _init_state_msg.data = self._state
+        self._arm_state_pub.publish(_init_state_msg)
+
         # ── Timers ─────────────────────────────────────────────────────
         self.create_timer(1.0 / JOINT_RATE_HZ, self._telemetry_timer_cb)
         self.create_timer(0.5, self._heartbeat_timer_cb)
@@ -291,6 +316,13 @@ class SpbBridgeNode(Node):
                       MetricDataType.Boolean, self._state == state_code)
         addMetric(payload, _m("Status/Heartbeat"), None,
                   MetricDataType.Boolean, self._heartbeat)
+        # OMAC PackML command authority (ISA-TR88.00.02 §5.4)
+        # Remote=False → Manual/local panel owns Start; Remote=True → SCADA owns Start
+        addMetric(payload, _m("Status/Remote"),   None,
+                  MetricDataType.Boolean, self._remote_mode)
+        # UnitMode: 1=Production (SCADA), 3=Manual (panel)
+        addMetric(payload, _m("Status/UnitMode"), None,
+                  MetricDataType.Int32, 1 if self._remote_mode else 3)
 
         # Cmd — Boolean sub-tags. SCADA writes True to trigger; bridge echoes
         # False after acting. TargetID retains its value across cycles.
@@ -477,7 +509,7 @@ class SpbBridgeNode(Node):
             else:
                 self.get_logger().warn(f"DCMD ignored (unknown metric): {name}")
 
-    def _execute_cntrl_cmd(self, code: str):
+    def _execute_cntrl_cmd(self, code: str, source: str = "scada"):
         if code == CMD_RESET:
             if self._state == STATE_COMPLETE:
                 self._set_state(STATE_IDLE)
@@ -488,6 +520,19 @@ class SpbBridgeNode(Node):
             return
 
         if code == CMD_START:
+            # OMAC PackML command-authority gating.
+            # Start is only valid from the source that owns the current UnitMode.
+            # Stop/Reset/Clear are always accepted from any source (PackML mandatory).
+            if source == "scada" and not self._remote_mode:
+                self.get_logger().warn(
+                    "SCADA Start rejected: UnitMode=Manual — panel has command authority"
+                )
+                return
+            if source == "panel" and self._remote_mode:
+                self.get_logger().warn(
+                    "Panel Start rejected: UnitMode=Auto — SCADA has command authority"
+                )
+                return
             if self._state != STATE_IDLE:
                 self.get_logger().warn(
                     f"Start ignored: state must be Idle (got {self._state})"
@@ -534,6 +579,10 @@ class SpbBridgeNode(Node):
             _m(suffix): (MetricDataType.Boolean, new_state == state_code)
             for state_code, suffix in _STATE_BOOL_TAGS.items()
         })
+        # Notify panel_node (TRANSIENT_LOCAL — last value retained for late joiners)
+        _msg = String()
+        _msg.data = new_state
+        self._arm_state_pub.publish(_msg)
 
     def _start_cycle(self):
         self._set_state(STATE_EXECUTE)
@@ -650,6 +699,52 @@ class SpbBridgeNode(Node):
                 f"Primary host '{self._primary_host_id}' OFFLINE — entering Safe State"
             )
             self._set_aborted(7003)
+
+    # ------------------------------------------------------------------
+    # Panel integration callbacks
+    # ------------------------------------------------------------------
+
+    def _panel_cmd_cb(self, msg: String):
+        """panel/cmd subscriber — panel_node publishes 'start'|'stop'|'reset'|'clear'."""
+        raw = msg.data.strip()
+        # Normalise to the CMD_* constants (first letter upper-case)
+        code = raw.title()
+        if code not in (CMD_START, CMD_STOP, CMD_RESET, CMD_CLEAR):
+            self.get_logger().warn(f"panel/cmd: unknown command '{raw}'")
+            return
+        self.get_logger().info(f"Panel cmd: {code} (state={self._state})")
+        self._execute_cntrl_cmd(code, source="panel")
+
+    def _panel_estop_cb(self, msg: Bool):
+        """panel/estop subscriber — True = E-Stop asserted, False = released."""
+        if msg.data:
+            self.get_logger().warn("panel/estop: E-Stop asserted → Aborted + alarm 7004")
+            self._set_aborted(7004)
+        else:
+            self.get_logger().info("panel/estop: E-Stop released")
+            if self._alarm_states.get(7004) != ALARM_NORMAL:
+                self._clear_alarm(7004)
+            # Return to Idle only if E-Stop was the only active alarm and we're Aborted
+            if self._state == STATE_ABORTED and self._active_alarm_count() == 0:
+                self._set_state(STATE_IDLE)
+
+    def _panel_mode_cb(self, msg: String):
+        """panel/mode subscriber — 'manual' | 'auto'."""
+        remote = msg.data.strip().lower() == "auto"
+        self._set_mode(remote)
+
+    def _set_mode(self, remote: bool):
+        """Switch between Manual (panel authority) and Auto (SCADA authority)."""
+        if remote == self._remote_mode:
+            return
+        self._remote_mode = remote
+        self.get_logger().info(
+            f"UnitMode → {'Auto/Production (SCADA authority)' if remote else 'Manual (panel authority)'}"
+        )
+        self._publish_ddata({
+            _m("Status/Remote"):   (MetricDataType.Boolean, remote),
+            _m("Status/UnitMode"): (MetricDataType.Int32,   1 if remote else 3),
+        })
 
     # ------------------------------------------------------------------
     # Shutdown

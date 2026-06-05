@@ -3,7 +3,15 @@
 # Override path: set AGX_ARM_CONFIG env var to point at a custom copy.
 
 can:
-  interface: can0
+  # CAN interface used to communicate with the arm.
+  #   can0 = onboard Jetson mttcan (requires external SN65HVD230 transceiver)
+  #   can1 = USB CAN adapter (candleLight/gs_usb — plug-and-play, no transceiver needed)
+  #
+  # This value is read by headless.sh at startup.
+  # It can also be overridden without editing this file by setting the env var:
+  #   export AGX_CAN_IFACE=can1   ← already set in ~/.bashrc
+  # Priority: AGX_CAN_IFACE env var > this file > built-in default (can1)
+  interface: can1
   script: ~/agx_arm_ws/src/agx_arm_ros/scripts/can_activate.sh
 
 arm_controller:

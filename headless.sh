@@ -19,10 +19,14 @@ set -eo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WORKSPACE="${HOME}/agx_arm_ws"
-CAN_IFACE="can0"
+_YAML_CAN="$(python3 -c "
+from agx_arm_gui.config_loader import load_config
+print(load_config().can_interface)
+" 2>/dev/null)"
+CAN_IFACE="${AGX_CAN_IFACE:-${_YAML_CAN:-can1}}"
 ARM_TYPE="piper"
 EFFECTOR_TYPE="agx_gripper"
-CAN_PORT="can0"
+CAN_PORT="${CAN_IFACE}"
 TCP_OFFSET="[0.0,0.0,0.0,0.0,0.0,0.0]"
 SIM_MODE=false
 BROKER_TYPE=""   # empty = use broker_type from gui_params.yaml; "hivemq" or "local" to override
@@ -90,11 +94,12 @@ print(load_config().can_script)
     [ -z "$CAN_SCRIPT" ] && CAN_SCRIPT="${WORKSPACE}/src/agx_arm_ros/scripts/can_activate.sh"
 
     log "Activating ${CAN_IFACE} via ${CAN_SCRIPT} ..."
-    sudo bash "${CAN_SCRIPT}" "${CAN_IFACE}" \
+    CAN_USB_ADDR="$(sudo ethtool -i "${CAN_IFACE}" 2>/dev/null | awk '/bus-info/{print $2}')"
+    bash "${CAN_SCRIPT}" "${CAN_IFACE}" 1000000 ${CAN_USB_ADDR} \
         || die "can_activate.sh failed — check that the USB-CAN adapter is plugged in."
 
-    STATE=$(cat "/sys/class/net/${CAN_IFACE}/operstate" 2>/dev/null || echo "missing")
-    [ "$STATE" = "up" ] || die "${CAN_IFACE} still not up after activation (state='${STATE}')."
+    ip link show "${CAN_IFACE}" 2>/dev/null | grep -q ",UP," \
+        || die "${CAN_IFACE} still not up after activation."
     log "${CAN_IFACE} is up."
 fi
 
@@ -148,7 +153,7 @@ log "Trajectory action server ready."
 if [ "$SIM_MODE" = false ]; then
     log "Enabling arm (allowing 2 s for controllers to settle)..."
     sleep 2
-    ros2 service call /enable_agx_arm std_srvs/srv/SetBool "{data: true}" > /dev/null 2>&1 \
+    timeout 5 ros2 service call /enable_agx_arm std_srvs/srv/SetBool "{data: true}" > /dev/null 2>&1 \
         && log "Arm enabled." \
         || log "WARNING: /enable_agx_arm call failed — arm may already be enabled."
 fi
